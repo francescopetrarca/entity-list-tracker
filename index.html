@@ -301,7 +301,43 @@ function EntityListTracker() {
   const [batchProgress, setBatchProgress] = useState("");
   const [apiKey, setApiKey] = useState(loadStoredKey());
   const [rememberKey, setRememberKey] = useState(() => !!loadStoredKey());
+  const [fetching, setFetching] = useState(false);
   const batchCancel = useRef(false);
+
+  const processRows = useCallback((data) => {
+    const el = data
+      .filter((r) => /entity list/i.test(r.source || ""))
+      .map((r, i) => ({
+        ...r,
+        _id: `el-${i}`,
+        countryList: countryNames(r),
+        frYear: frVolumeYear(r.federal_register_notice),
+      }));
+    if (!el.length) {
+      setParseErr(
+        "Parsed the file but found no rows with source matching 'Entity List'. Check that this is the CSL consolidated.csv."
+      );
+      return;
+    }
+    setRows(el);
+  }, []);
+
+  const fetchLatest = useCallback(async () => {
+    setParseErr("");
+    setFetching(true);
+    try {
+      const res = await fetch(SOURCE_URL);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const text = await res.text();
+      const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+      setFileName("consolidated.csv (fetched live from data.trade.gov)");
+      setRetrievedDate(todayISO());
+      processRows(parsed.data);
+    } catch (err) {
+      setParseErr("Could not fetch the live CSL: " + err.message + ". Try downloading the CSV manually and uploading it below.");
+    }
+    setFetching(false);
+  }, [processRows]);
 
   const onApiKeyChange = useCallback((val) => {
     setApiKey(val);
@@ -323,28 +359,14 @@ function EntityListTracker() {
       skipEmptyLines: true,
       complete: (res) => {
         try {
-          const el = res.data
-            .filter((r) => /entity list/i.test(r.source || ""))
-            .map((r, i) => ({
-              ...r,
-              _id: `el-${i}`,
-              countryList: countryNames(r),
-              frYear: frVolumeYear(r.federal_register_notice),
-            }));
-          if (!el.length) {
-            setParseErr(
-              "Parsed the file but found no rows with source matching 'Entity List'. Check that this is the CSL consolidated.csv."
-            );
-            return;
-          }
-          setRows(el);
+          processRows(res.data);
         } catch (err) {
           setParseErr("Parse error: " + err.message);
         }
       },
       error: (err) => setParseErr("Could not read file: " + err.message),
     });
-  }, []);
+  }, [processRows]);
 
   const isChina = useCallback(
     (list) => list.some((c) => c === "China" || (hkAsChina && (c === "Hong Kong" || c === "Macau"))),
@@ -550,6 +572,14 @@ function EntityListTracker() {
         {/* loader */}
         {!rows && (
           <Panel title="Load the Entity List" stamp={baseStamp}>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
+              <Btn onClick={fetchLatest} disabled={fetching}>
+                {fetching ? "Fetching latest CSL…" : "Load latest from data.trade.gov"}
+              </Btn>
+              <span style={{ fontFamily: MONO, fontSize: 11, color: MUTED }}>
+                pulls today's consolidated.csv directly (~17 MB) — or load a saved copy below
+              </span>
+            </div>
             <ol style={{ margin: "0 0 16px", paddingLeft: 20, fontSize: 14, lineHeight: 1.7 }}>
               <li>
                 Download the Consolidated Screening List CSV from{" "}
