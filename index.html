@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Entity List Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>body { margin: 0; }</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useCallback, useRef } = React;
+const {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
+} = Recharts;
+
+/* ============================================================
+   ENTITY LIST TRACKER — research console (standalone build)
+   Data source: Consolidated Screening List (ITA/trade.gov)
+   https://data.trade.gov/downloadable_consolidated_screening_list/v1/consolidated.csv
+   Filtered to source = Entity List (EL) — Bureau of Industry and Security
+   ============================================================ */
+
+const SOURCE_URL =
+  "https://data.trade.gov/downloadable_consolidated_screening_list/v1/consolidated.csv";
+
+const INK = "#171A1F";
+const PAPER = "#F4F6F7";
+const PANEL = "#FFFFFF";
+const BLUE = "#1F4E8C";
+const NAVY = "#143055";
+const RED = "#B3261E";
+const AMBER = "#9A6A00";
+const GREEN = "#1E6B3A";
+const LINE = "#D7DCE0";
+const MUTED = "#5B6470";
+const MONO = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace";
+const SANS = "'Helvetica Neue', Helvetica, Arial, sans-serif";
+
+const ISO2 = {
+  CN: "China", HK: "Hong Kong", MO: "Macau", TW: "Taiwan", RU: "Russia", IR: "Iran",
+  PK: "Pakistan", AE: "United Arab Emirates", SG: "Singapore", TR: "Turkey",
+  BR: "Brazil", DE: "Germany", GB: "United Kingdom", UK: "United Kingdom",
+  NL: "Netherlands", BE: "Belgium", CH: "Switzerland", FR: "France", IN: "India",
+  JP: "Japan", KR: "South Korea", MY: "Malaysia", TH: "Thailand", VN: "Vietnam",
+  ID: "Indonesia", PH: "Philippines", KZ: "Kazakhstan", BY: "Belarus", UA: "Ukraine",
+  AM: "Armenia", GE: "Georgia", UZ: "Uzbekistan", KG: "Kyrgyzstan", CA: "Canada",
+  MX: "Mexico", AR: "Argentina", CL: "Chile", BO: "Bolivia", PY: "Paraguay",
+  PE: "Peru", CO: "Colombia", JM: "Jamaica", CU: "Cuba", EG: "Egypt", MA: "Morocco",
+  ZA: "South Africa", MG: "Madagascar", LB: "Lebanon", JO: "Jordan", OM: "Oman",
+  QA: "Qatar", SA: "Saudi Arabia", SY: "Syria", IQ: "Iraq", AF: "Afghanistan",
+  MM: "Burma (Myanmar)", LK: "Sri Lanka", IL: "Israel", IT: "Italy", ES: "Spain",
+  PT: "Portugal", SE: "Sweden", DK: "Denmark", FI: "Finland", NO: "Norway",
+  AT: "Austria", CZ: "Czechia", PL: "Poland", RO: "Romania", BG: "Bulgaria",
+  HU: "Hungary", GR: "Greece", CY: "Cyprus", MT: "Malta", EE: "Estonia",
+  LV: "Latvia", LT: "Lithuania", AU: "Australia", NZ: "New Zealand", KP: "North Korea",
+  VE: "Venezuela", PA: "Panama", CR: "Costa Rica", NI: "Nicaragua", US: "United States",
+  AZ: "Azerbaijan", TJ: "Tajikistan", TM: "Turkmenistan", MD: "Moldova", RS: "Serbia",
+  BA: "Bosnia and Herzegovina", MK: "North Macedonia", AL: "Albania", IE: "Ireland",
+  LU: "Luxembourg", LI: "Liechtenstein", MC: "Monaco", SM: "San Marino", SD: "Sudan",
+  LY: "Libya", YE: "Yemen", KW: "Kuwait", BH: "Bahrain", NG: "Nigeria", KE: "Kenya",
+  ET: "Ethiopia", GH: "Ghana", TZ: "Tanzania", UG: "Uganda", SN: "Senegal",
+  CI: "Côte d'Ivoire", CM: "Cameroon", CD: "DR Congo", AO: "Angola", MZ: "Mozambique",
+  ZW: "Zimbabwe", BD: "Bangladesh", NP: "Nepal", KH: "Cambodia", LA: "Laos",
+  MN: "Mongolia", BN: "Brunei", MV: "Maldives", FJ: "Fiji",
+};
+
+const DEFAULT_KEYWORDS = [
+  "huawei", "hisilicon", "hikvision", "dahua", "zte", "smic", "fudan", "sugon",
+  "inspur", "dji", "cetc", "avic", "casic", "casc", "comac", "norinco", "sino",
+  "china", "chinese", "zhong", "hua ke", "toga networks", "cloudwalk", "megvii",
+  "sensetime", "iflytek", "yangtze memory", "ymtc", "cxmt", "loongson", "phytium",
+  "tencent", "alibaba", "baidu", "lenovo", "tp-link", "futurewei", "honor",
+  "beijing", "shanghai", "shenzhen", "guangzhou", "hangzhou", "chengdu", "wuhan",
+];
+
+function frVolumeYear(frNotice) {
+  if (!frNotice) return null;
+  const m = String(frNotice).match(/(\d{2,3})\s*F\.?R\.?/i);
+  if (!m) return null;
+  const vol = parseInt(m[1], 10);
+  if (vol < 40 || vol > 120) return null;
+  return vol + 1935; // FR volume 84 = 2019, 90 = 2025, ...
+}
+
+function countryNames(row) {
+  const raw = (row.countries || "").trim();
+  if (raw) {
+    return raw.split(/[;,]/).map((c) => c.trim().toUpperCase()).filter(Boolean)
+      .map((c) => ISO2[c] || c);
+  }
+  // fallback: last token of first address segment
+  const addr = (row.addresses || "").split(";")[0] || "";
+  const parts = addr.split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length) {
+    const last = parts[parts.length - 1].toUpperCase();
+    if (ISO2[last]) return [ISO2[last]];
+    const named = Object.values(ISO2).find((n) => n.toUpperCase() === last);
+    if (named) return [named];
+    return [parts[parts.length - 1]];
+  }
+  return ["Unknown"];
+}
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/* ---------- API key persistence (local browser only) ---------- */
+const KEY_STORAGE = "elt_anthropic_key";
+function loadStoredKey() {
+  try { return localStorage.getItem(KEY_STORAGE) || ""; } catch (e) { return ""; }
+}
+function storeKey(k) {
+  try {
+    if (k) localStorage.setItem(KEY_STORAGE, k);
+    else localStorage.removeItem(KEY_STORAGE);
+  } catch (e) { /* file:// storage may be unavailable; key stays in memory */ }
+}
+
+/* ---------- provenance stamp (signature element) ---------- */
+function Stamp({ lines }) {
+  return (
+    <div
+      style={{
+        border: `1.5px dashed ${BLUE}`,
+        color: BLUE,
+        fontFamily: MONO,
+        fontSize: 10,
+        lineHeight: 1.5,
+        padding: "6px 10px",
+        transform: "rotate(-0.6deg)",
+        background: "rgba(31,78,140,0.04)",
+        display: "inline-block",
+        maxWidth: "100%",
+        wordBreak: "break-all",
+      }}
+    >
+      {lines.map((l, i) => (
+        <div key={i}>
+          <span style={{ opacity: 0.65 }}>{l[0]}</span> {l[1]}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Panel({ title, children, stamp, right }) {
+  return (
+    <section style={{ background: PANEL, border: `1px solid ${LINE}`, marginBottom: 20 }}>
+      <header
+        style={{
+          display: "flex", justifyContent: "space-between", alignItems: "baseline",
+          borderBottom: `2px solid ${INK}`, padding: "10px 16px",
+        }}
+      >
+        <h2 style={{
+          margin: 0, fontFamily: SANS, fontSize: 13, fontWeight: 700,
+          letterSpacing: "0.12em", textTransform: "uppercase", color: INK,
+        }}>
+          {title}
+        </h2>
+        {right || null}
+      </header>
+      <div style={{ padding: 16 }}>{children}</div>
+      {stamp && <div style={{ padding: "0 16px 14px" }}>{stamp}</div>}
+    </section>
+  );
+}
+
+function Chip({ children, color = MUTED, bg = "transparent" }) {
+  return (
+    <span style={{
+      fontFamily: MONO, fontSize: 10.5, color, background: bg,
+      border: `1px solid ${color}`, padding: "1px 6px", borderRadius: 2,
+      whiteSpace: "nowrap",
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function Btn({ children, onClick, disabled, tone = "blue", small }) {
+  const c = tone === "red" ? RED : tone === "ghost" ? MUTED : BLUE;
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        fontFamily: SANS, fontWeight: 600, fontSize: small ? 11 : 12.5,
+        letterSpacing: "0.04em", cursor: disabled ? "not-allowed" : "pointer",
+        background: tone === "ghost" ? "transparent" : c, color: tone === "ghost" ? c : "#fff",
+        border: `1px solid ${c}`, padding: small ? "3px 9px" : "7px 14px",
+        opacity: disabled ? 0.45 : 1,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/* ---------- AI sleuth (direct Anthropic API call, browser) ---------- */
+async function sleuthEntity(row, apiKey) {
+  if (!apiKey) throw new Error("No API key set. Paste your Anthropic API key in the bar above the tabs.");
+  const prompt = `You are an export-controls research analyst. Investigate the ownership and control of the following entity on the U.S. Commerce Department Entity List, which is listed under a destination OTHER than mainland China.
+
+ENTITY NAME: ${row.name}
+LISTED DESTINATION(S): ${row.countryList.join(", ")}
+ADDRESSES: ${row.addresses || "n/a"}
+ALTERNATE NAMES: ${row.alt_names || "n/a"}
+FEDERAL REGISTER NOTICE: ${row.federal_register_notice || "n/a"}
+LICENSE REQUIREMENT: ${row.license_requirement || "n/a"}
+
+TASK: Determine whether this entity is owned by, controlled by, or an affiliate/subsidiary of a Chinese (PRC) parent company, Chinese state entity, or PRC nationals — i.e., whether a count of "Chinese entities" on the Entity List that only counted the China destination would have missed it. Use web search. Check the Federal Register notice context, corporate registries, and reputable reporting.
+
+Respond with ONLY a JSON object, no markdown fences, no preamble:
+{"verdict": "chinese_linked" | "not_linked" | "unclear", "confidence": "high" | "medium" | "low", "parent": "<name of Chinese parent/owner or null>", "evidence": "<2-3 sentence summary>", "sources": ["<url>", "..."]}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: prompt }],
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+    }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || data.error.type || "API error");
+  const text = (data.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+  const clean = text.replace(/```json|```/g, "").trim();
+  const start = clean.indexOf("{");
+  const end = clean.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("No JSON in sub-agent reply");
+  return JSON.parse(clean.slice(start, end + 1));
+}
+
+const VERDICT_STYLE = {
+  chinese_linked: { label: "CHINESE-LINKED", color: RED },
+  not_linked: { label: "NOT LINKED", color: GREEN },
+  unclear: { label: "UNCLEAR", color: AMBER },
+};
+
+/* ---------- known patterns seeded from prior research ---------- */
+const KNOWN_LEADS = [
+  {
+    head: "Huawei affiliates, May 2019 (84 FR 22961)",
+    body: "Huawei plus 68 non-U.S. affiliates listed across 26 destinations including Brazil (Huawei do Brasil Telecomunicações), Bolivia, Chile, Paraguay, Jamaica, Canada, and much of Europe and Asia. The single largest block of Chinese-owned entries listed under third-country destinations.",
+  },
+  {
+    head: "Huawei affiliates, Aug 2019 (84 FR 43493)",
+    body: "46 further affiliates across 25 destinations including Argentina, Mexico, Panama, Costa Rica, Cuba — Latin American footprint expands beyond Brazil.",
+  },
+  {
+    head: "Huawei Cloud / OpenLab, Aug 2020 (85 FR 51596)",
+    body: "38 affiliates including Huawei Cloud Argentina, Brazil, Chile, Mexico, Peru, plus Toga Networks (Israel) — a Huawei R&D arm whose name carries no Chinese marker at all. Keyword screens miss this class; AI sleuthing catches it.",
+  },
+  {
+    head: "Fudan Microelectronics affiliates, Sep 2025 (90 FR, eff. 9/12/2025)",
+    body: "Shanghai Fudan Microelectronics affiliates listed under Singapore and Taiwan destinations — recent example of a Chinese chipmaker's third-country arms being listed separately.",
+  },
+  {
+    head: "Advanced-IC diversion entries, Jan 2025",
+    body: "Foundry rule added 16 entities under China (14) and Singapore (2) for advanced-computing IC diversion risk to Huawei — Singapore entries are China-linked by function.",
+  },
+  {
+    head: "Transshipment networks, Mar/Sep/Oct 2025",
+    body: "Entries under UAE, Turkey, India, South Africa, Pakistan for diversion networks. Some are Chinese-owned (e.g., Hua Ke Supply Chain entries under HK/China heading); others serve Chinese or Russian end-users without Chinese ownership — ownership vs. service distinction matters for the count.",
+  },
+];
+
+/* ============================================================ */
+function EntityListTracker() {
+  const [rows, setRows] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const [retrievedDate, setRetrievedDate] = useState(todayISO());
+  const [parseErr, setParseErr] = useState("");
+  const [tab, setTab] = useState("overview");
+  const [hkAsChina, setHkAsChina] = useState(false);
+  const [keywords, setKeywords] = useState(DEFAULT_KEYWORDS.join(", "));
+  const [search, setSearch] = useState("");
+  const [countryFilter, setCountryFilter] = useState("all");
+  const [shown, setShown] = useState(50);
+  const [verdicts, setVerdicts] = useState({}); // id -> {status, result, error}
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchProgress, setBatchProgress] = useState("");
+  const [apiKey, setApiKey] = useState(loadStoredKey());
+  const [rememberKey, setRememberKey] = useState(() => !!loadStoredKey());
+  const batchCancel = useRef(false);
+
+  const onApiKeyChange = useCallback((val) => {
+    setApiKey(val);
+    if (rememberKey) storeKey(val);
+  }, [rememberKey]);
+
+  const onRememberChange = useCallback((checked) => {
+    setRememberKey(checked);
+    storeKey(checked ? apiKey : "");
+  }, [apiKey]);
+
+  const onFile = useCallback((e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    setParseErr("");
+    setFileName(f.name);
+    Papa.parse(f, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        try {
+          const el = res.data
+            .filter((r) => /entity list/i.test(r.source || ""))
+            .map((r, i) => ({
+              ...r,
+              _id: `el-${i}`,
+              countryList: countryNames(r),
+              frYear: frVolumeYear(r.federal_register_notice),
+            }));
+          if (!el.length) {
+            setParseErr(
+              "Parsed the file but found no rows with source matching 'Entity List'. Check that this is the CSL consolidated.csv."
+            );
+            return;
+          }
+          setRows(el);
+        } catch (err) {
+          setParseErr("Parse error: " + err.message);
+        }
+      },
+      error: (err) => setParseErr("Could not read file: " + err.message),
+    });
+  }, []);
+
+  const isChina = useCallback(
+    (list) => list.some((c) => c === "China" || (hkAsChina && (c === "Hong Kong" || c === "Macau"))),
+    [hkAsChina]
+  );
+
+  const stats = useMemo(() => {
+    if (!rows) return null;
+    const byCountry = {};
+    const byYear = {};
+    let chinaCount = 0;
+    rows.forEach((r) => {
+      const primary = r.countryList[0] || "Unknown";
+      byCountry[primary] = (byCountry[primary] || 0) + 1;
+      if (r.frYear) byYear[r.frYear] = (byYear[r.frYear] || 0) + 1;
+      if (isChina(r.countryList)) chinaCount += 1;
+    });
+    const countries = Object.entries(byCountry).sort((a, b) => b[1] - a[1]);
+    const years = Object.entries(byYear)
+      .map(([y, n]) => ({ year: y, additions: n }))
+      .sort((a, b) => a.year - b.year);
+    return { byCountry: countries, byYear: years, chinaCount, total: rows.length };
+  }, [rows, isChina]);
+
+  const kwList = useMemo(
+    () => keywords.split(",").map((k) => k.trim().toLowerCase()).filter(Boolean),
+    [keywords]
+  );
+
+  const nonChina = useMemo(
+    () => (rows ? rows.filter((r) => !isChina(r.countryList)) : []),
+    [rows, isChina]
+  );
+
+  const flagged = useMemo(() => {
+    return nonChina
+      .map((r) => {
+        const hay = {
+          name: (r.name || "").toLowerCase(),
+          alt: (r.alt_names || "").toLowerCase(),
+          remarks: (r.remarks || "").toLowerCase(),
+        };
+        const hits = [];
+        kwList.forEach((k) => {
+          if (hay.name.includes(k)) hits.push({ k, field: "name" });
+          else if (hay.alt.includes(k)) hits.push({ k, field: "alt names" });
+          else if (hay.remarks.includes(k)) hits.push({ k, field: "remarks" });
+        });
+        return hits.length ? { ...r, hits } : null;
+      })
+      .filter(Boolean);
+  }, [nonChina, kwList]);
+
+  const filteredNonChina = useMemo(() => {
+    let out = nonChina;
+    if (countryFilter !== "all") out = out.filter((r) => r.countryList.includes(countryFilter));
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      out = out.filter(
+        (r) =>
+          (r.name || "").toLowerCase().includes(q) ||
+          (r.alt_names || "").toLowerCase().includes(q)
+      );
+    }
+    return out;
+  }, [nonChina, countryFilter, search]);
+
+  const nonChinaCountries = useMemo(() => {
+    const s = new Set();
+    nonChina.forEach((r) => r.countryList.forEach((c) => s.add(c)));
+    return Array.from(s).sort();
+  }, [nonChina]);
+
+  const runSleuth = useCallback(async (row) => {
+    setVerdicts((v) => ({ ...v, [row._id]: { status: "running" } }));
+    try {
+      const result = await sleuthEntity(row, apiKey);
+      setVerdicts((v) => ({ ...v, [row._id]: { status: "done", result } }));
+      return result;
+    } catch (err) {
+      setVerdicts((v) => ({ ...v, [row._id]: { status: "error", error: err.message } }));
+      return null;
+    }
+  }, [apiKey]);
+
+  const runBatch = useCallback(async () => {
+    batchCancel.current = false;
+    setBatchRunning(true);
+    const targets = flagged.filter((r) => !verdicts[r._id] || verdicts[r._id].status === "error");
+    for (let i = 0; i < targets.length; i++) {
+      if (batchCancel.current) break;
+      setBatchProgress(`${i + 1} / ${targets.length}: ${targets[i].name}`);
+      // eslint-disable-next-line no-await-in-loop
+      await runSleuth(targets[i]);
+    }
+    setBatchProgress("");
+    setBatchRunning(false);
+  }, [flagged, verdicts, runSleuth]);
+
+  const exportCSV = useCallback(() => {
+    const header = [
+      "name", "listed_destination", "addresses", "alt_names", "federal_register_notice",
+      "fr_year_estimate", "keyword_hits", "ai_verdict", "ai_confidence", "ai_parent",
+      "ai_evidence", "ai_sources", "data_source", "data_retrieved", "screen_method",
+      "generated",
+    ];
+    const lines = [header.join(",")];
+    flagged.forEach((r) => {
+      const v = verdicts[r._id];
+      const res = v && v.status === "done" ? v.result : {};
+      const cells = [
+        r.name, r.countryList.join("; "), r.addresses, r.alt_names,
+        r.federal_register_notice, r.frYear || "",
+        r.hits.map((h) => `${h.k}@${h.field}`).join("; "),
+        res.verdict || "", res.confidence || "", res.parent || "",
+        res.evidence || "", (res.sources || []).join(" "),
+        SOURCE_URL, retrievedDate,
+        "keyword screen on name/alt_names/remarks + Claude Sonnet web-search verification",
+        new Date().toISOString(),
+      ];
+      lines.push(
+        cells.map((c) => `"${String(c == null ? "" : c).replace(/"/g, '""')}"`).join(",")
+      );
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `entity-list-china-linked-screen-${todayISO()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [flagged, verdicts, retrievedDate]);
+
+  const baseStamp = (
+    <Stamp
+      lines={[
+        ["SOURCE", "Consolidated Screening List, ITA / trade.gov (Entity List rows only)"],
+        ["URL", SOURCE_URL],
+        ["RETRIEVED", retrievedDate + (fileName ? ` · file: ${fileName}` : "")],
+        ["GENERATED", todayISO()],
+      ]}
+    />
+  );
+
+  /* ----------------------- render ----------------------- */
+  return (
+    <div style={{ background: PAPER, minHeight: "100vh", color: INK, fontFamily: SANS }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "28px 20px 60px" }}>
+        {/* masthead */}
+        <div style={{ borderBottom: `3px double ${INK}`, paddingBottom: 14, marginBottom: 22 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
+            <div>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: MUTED, letterSpacing: "0.08em" }}>
+                SUPPLEMENT NO. 4 TO PART 744 · EAR · BUREAU OF INDUSTRY AND SECURITY
+              </div>
+              <h1 style={{ margin: "4px 0 0", fontSize: 30, fontWeight: 800, letterSpacing: "-0.01em" }}>
+                Entity List Tracker
+              </h1>
+              <div style={{ fontSize: 13.5, color: MUTED, marginTop: 4, maxWidth: 640 }}>
+                Adding up entity listings — with a screen for Chinese-owned or Chinese-linked
+                entities listed under third-country destinations.
+              </div>
+            </div>
+            {rows && (
+              <div style={{ textAlign: "right", fontFamily: MONO, fontSize: 12 }}>
+                <div><b>{stats.total.toLocaleString()}</b> EL entries</div>
+                <div style={{ color: RED }}><b>{stats.chinaCount.toLocaleString()}</b> under China{hkAsChina ? " (+HK/MO)" : ""}</div>
+                <div style={{ color: BLUE }}><b>{(stats.total - stats.chinaCount).toLocaleString()}</b> elsewhere</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* API key bar (needed for AI sleuth) */}
+        <div style={{
+          display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
+          background: PANEL, border: `1px solid ${LINE}`, padding: "8px 12px", marginBottom: 18,
+        }}>
+          <span style={{ fontFamily: MONO, fontSize: 11, color: MUTED, letterSpacing: "0.06em" }}>
+            ANTHROPIC API KEY
+          </span>
+          <input
+            type="password"
+            placeholder="sk-ant-… (required only for AI sleuth)"
+            value={apiKey}
+            onChange={(e) => onApiKeyChange(e.target.value)}
+            style={{
+              fontFamily: MONO, fontSize: 12, padding: "5px 8px",
+              border: `1px solid ${LINE}`, flex: "1 1 260px", minWidth: 200,
+            }}
+          />
+          <label style={{ fontFamily: MONO, fontSize: 11, color: MUTED, whiteSpace: "nowrap" }}>
+            <input
+              type="checkbox"
+              checked={rememberKey}
+              onChange={(e) => onRememberChange(e.target.checked)}
+            />{" "}
+            remember in this browser
+          </label>
+          <Chip color={apiKey ? GREEN : AMBER}>{apiKey ? "KEY SET" : "NO KEY — sleuth disabled"}</Chip>
+        </div>
+
+        {/* loader */}
+        {!rows && (
+          <Panel title="Load the Entity List" stamp={baseStamp}>
+            <ol style={{ margin: "0 0 16px", paddingLeft: 20, fontSize: 14, lineHeight: 1.7 }}>
+              <li>
+                Download the Consolidated Screening List CSV from{" "}
+                <a href={SOURCE_URL} target="_blank" rel="noreferrer" style={{ color: BLUE }}>
+                  data.trade.gov
+                </a>{" "}
+                (or via trade.gov → Consolidated Screening List → CSV Download).
+              </li>
+              <li>Set the retrieval date below — it is stamped into every export.</li>
+              <li>Upload the file. Only rows with source “Entity List (EL)” are kept; everything is parsed in your browser.</li>
+            </ol>
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+              <label style={{ fontFamily: MONO, fontSize: 12 }}>
+                RETRIEVED{" "}
+                <input
+                  type="date"
+                  value={retrievedDate}
+                  onChange={(e) => setRetrievedDate(e.target.value)}
+                  style={{ fontFamily: MONO, fontSize: 12, border: `1px solid ${LINE}`, padding: "4px 6px" }}
+                />
+              </label>
+              <input type="file" accept=".csv,.tsv,text/csv" onChange={onFile} style={{ fontSize: 13 }} />
+            </div>
+            {parseErr && (
+              <div style={{ marginTop: 12, color: RED, fontFamily: MONO, fontSize: 12 }}>{parseErr}</div>
+            )}
+          </Panel>
+        )}
+
+        {rows && (
+          <>
+            {/* tabs */}
+            <nav style={{ display: "flex", gap: 0, marginBottom: 20, borderBottom: `1px solid ${LINE}` }}>
+              {[
+                ["overview", "Overview"],
+                ["screen", `China-Linkage Screen (${flagged.length})`],
+                ["all", `All Non-China Entries (${nonChina.length})`],
+                ["leads", "Leads & Method"],
+              ].map(([id, label]) => (
+                <button
+                  key={id}
+                  onClick={() => setTab(id)}
+                  style={{
+                    fontFamily: SANS, fontSize: 12.5, fontWeight: 700, letterSpacing: "0.06em",
+                    textTransform: "uppercase", padding: "10px 16px", cursor: "pointer",
+                    background: tab === id ? INK : "transparent",
+                    color: tab === id ? "#fff" : MUTED, border: "none",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+              <label style={{ marginLeft: "auto", alignSelf: "center", fontFamily: MONO, fontSize: 11, color: MUTED }}>
+                <input type="checkbox" checked={hkAsChina} onChange={(e) => setHkAsChina(e.target.checked)} />{" "}
+                treat HK/Macau as China
+              </label>
+            </nav>
+
+            {/* OVERVIEW */}
+            {tab === "overview" && (
+              <>
+                <Panel
+                  title="Entries by listed destination (top 18)"
+                  stamp={baseStamp}
+                  right={<Chip color={MUTED}>destination ≠ ownership</Chip>}
+                >
+                  <ResponsiveContainer width="100%" height={Math.min(18, stats.byCountry.length) * 26 + 30}>
+                    <BarChart
+                      data={stats.byCountry.slice(0, 18).map(([c, n]) => ({ country: c, entries: n }))}
+                      layout="vertical"
+                      margin={{ left: 8, right: 40, top: 4, bottom: 4 }}
+                    >
+                      <CartesianGrid horizontal={false} stroke={LINE} />
+                      <XAxis type="number" tick={{ fontFamily: MONO, fontSize: 11 }} stroke={MUTED} />
+                      <YAxis
+                        type="category" dataKey="country" width={150}
+                        tick={{ fontFamily: SANS, fontSize: 12 }} stroke={MUTED}
+                      />
+                      <Tooltip contentStyle={{ fontFamily: MONO, fontSize: 12, border: `1px solid ${INK}` }} />
+                      <Bar dataKey="entries" isAnimationActive={false}>
+                        {stats.byCountry.slice(0, 18).map(([c], i) => (
+                          <Cell key={i} fill={c === "China" ? RED : BLUE} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </Panel>
+
+                <Panel
+                  title="Additions by Federal Register volume year"
+                  right={<Chip color={AMBER}>estimate</Chip>}
+                  stamp={
+                    <Stamp lines={[
+                      ["METHOD", "Year inferred from FR volume in each entry's citation (vol. 84 → 2019). Entries lacking an FR citation are excluded; modified entries carry their most recent citation."],
+                      ["CAVEAT", "Cross-check counts against individual final rules before publication."],
+                    ]} />
+                  }
+                >
+                  <ResponsiveContainer width="100%" height={240}>
+                    <BarChart data={stats.byYear} margin={{ left: 0, right: 20, top: 8 }}>
+                      <CartesianGrid vertical={false} stroke={LINE} />
+                      <XAxis dataKey="year" tick={{ fontFamily: MONO, fontSize: 11 }} stroke={MUTED} />
+                      <YAxis tick={{ fontFamily: MONO, fontSize: 11 }} stroke={MUTED} />
+                      <Tooltip contentStyle={{ fontFamily: MONO, fontSize: 12, border: `1px solid ${INK}` }} />
+                      <Bar dataKey="additions" fill={NAVY} isAnimationActive={false} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </Panel>
+              </>
+            )}
+
+            {/* SCREEN */}
+            {tab === "screen" && (
+              <>
+                <Panel
+                  title="Keyword screen — non-China entries with Chinese markers"
+                  right={
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <Btn small tone="ghost" onClick={exportCSV}>Export CSV</Btn>
+                      {!batchRunning ? (
+                        <Btn small onClick={runBatch} disabled={!flagged.length || !apiKey}>
+                          Sleuth all flagged ({flagged.filter((r) => !verdicts[r._id] || verdicts[r._id].status === "error").length})
+                        </Btn>
+                      ) : (
+                        <Btn small tone="red" onClick={() => { batchCancel.current = true; }}>
+                          Stop batch
+                        </Btn>
+                      )}
+                    </div>
+                  }
+                  stamp={
+                    <Stamp lines={[
+                      ["METHOD", "Case-insensitive keyword match on name, alt_names, remarks for entries listed outside China."],
+                      ["LIMIT", "Keyword screens miss Chinese-owned firms with neutral names (e.g., Toga Networks). Use AI sleuth on the full non-China table to close that gap."],
+                      ["AI", "Verdicts produced by Claude Sonnet with live web search; verify sources before citing."],
+                    ]} />
+                  }
+                >
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontFamily: MONO, fontSize: 11, color: MUTED, marginBottom: 4 }}>
+                      KEYWORDS (comma-separated, editable)
+                    </div>
+                    <textarea
+                      value={keywords}
+                      onChange={(e) => setKeywords(e.target.value)}
+                      rows={2}
+                      style={{
+                        width: "100%", fontFamily: MONO, fontSize: 11.5, padding: 8,
+                        border: `1px solid ${LINE}`, resize: "vertical", boxSizing: "border-box",
+                      }}
+                    />
+                  </div>
+                  {batchProgress && (
+                    <div style={{ fontFamily: MONO, fontSize: 12, color: BLUE, marginBottom: 10 }}>
+                      Sleuthing {batchProgress}…
+                    </div>
+                  )}
+                  <EntityTable
+                    rows={flagged}
+                    verdicts={verdicts}
+                    onSleuth={runSleuth}
+                    sleuthEnabled={!!apiKey}
+                    showHits
+                  />
+                </Panel>
+              </>
+            )}
+
+            {/* ALL NON-CHINA */}
+            {tab === "all" && (
+              <Panel
+                title="All Entity List entries outside China"
+                stamp={baseStamp}
+                right={<Chip color={BLUE}>{filteredNonChina.length} shown of {nonChina.length}</Chip>}
+              >
+                <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+                  <input
+                    placeholder="Search name or alias…"
+                    value={search}
+                    onChange={(e) => { setSearch(e.target.value); setShown(50); }}
+                    style={{ fontFamily: MONO, fontSize: 12, padding: "6px 10px", border: `1px solid ${LINE}`, flex: "1 1 220px" }}
+                  />
+                  <select
+                    value={countryFilter}
+                    onChange={(e) => { setCountryFilter(e.target.value); setShown(50); }}
+                    style={{ fontFamily: MONO, fontSize: 12, padding: "6px 10px", border: `1px solid ${LINE}` }}
+                  >
+                    <option value="all">All destinations</option>
+                    {nonChinaCountries.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+                <EntityTable
+                  rows={filteredNonChina.slice(0, shown)}
+                  verdicts={verdicts}
+                  onSleuth={runSleuth}
+                  sleuthEnabled={!!apiKey}
+                />
+                {filteredNonChina.length > shown && (
+                  <div style={{ marginTop: 12 }}>
+                    <Btn tone="ghost" onClick={() => setShown((s) => s + 100)}>
+                      Show 100 more ({filteredNonChina.length - shown} remaining)
+                    </Btn>
+                  </div>
+                )}
+              </Panel>
+            )}
+
+            {/* LEADS */}
+            {tab === "leads" && (
+              <Panel
+                title="Known patterns to check against your prior count"
+                stamp={
+                  <Stamp lines={[
+                    ["BASIS", "Federal Register final rules 2019–2025 (84 FR 22961; 84 FR 43493; 85 FR 51596; 2025 rules of Jan 15, Mar 28, Sep 12, Oct 9)."],
+                    ["NOTE", "Compiled from public BIS/FR materials; re-verify citations in the FR before publication."],
+                  ]} />
+                }
+              >
+                <div style={{ display: "grid", gap: 0 }}>
+                  {KNOWN_LEADS.map((l, i) => (
+                    <div key={i} style={{ borderTop: i ? `1px solid ${LINE}` : "none", padding: "12px 0" }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 3 }}>{l.head}</div>
+                      <div style={{ fontSize: 13, color: "#333", lineHeight: 1.55 }}>{l.body}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 14, fontSize: 13, lineHeight: 1.6, borderLeft: `3px solid ${BLUE}`, paddingLeft: 12, color: "#333" }}>
+                  <b>Counting decision for the paper:</b> distinguish (a) Chinese-<i>owned</i> entities
+                  listed under third-country destinations (Huawei do Brasil; Huawei Cloud Argentina;
+                  Toga Networks; Fudan's Singapore/Taiwan arms) from (b) third-country entities
+                  serving Chinese end-users without Chinese ownership (many UAE/Turkey transshippers).
+                  Class (a) belongs in a corrected "Chinese entities" count; class (b) is better
+                  treated as a separate diversion-network series.
+                </div>
+              </Panel>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- shared entity table with sleuth rows ---------- */
+function EntityTable({ rows, verdicts, onSleuth, showHits, sleuthEnabled }) {
+  const [open, setOpen] = useState({});
+  if (!rows.length) {
+    return (
+      <div style={{ fontFamily: MONO, fontSize: 12, color: MUTED, padding: "20px 0" }}>
+        No entries match. Adjust keywords or filters to begin screening.
+      </div>
+    );
+  }
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <thead>
+          <tr style={{ borderBottom: `2px solid ${INK}`, textAlign: "left" }}>
+            <th style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 10.5, letterSpacing: "0.06em" }}>ENTITY</th>
+            <th style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 10.5 }}>DESTINATION</th>
+            <th style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 10.5 }}>FR NOTICE</th>
+            {showHits && <th style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 10.5 }}>MATCHED</th>}
+            <th style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 10.5 }}>AI VERDICT</th>
+            <th style={{ padding: "6px 8px" }} />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const v = verdicts[r._id];
+            const vs = v && v.status === "done" ? VERDICT_STYLE[v.result.verdict] || VERDICT_STYLE.unclear : null;
+            const isOpen = open[r._id];
+            return (
+              <React.Fragment key={r._id}>
+                <tr style={{ borderBottom: `1px solid ${LINE}`, verticalAlign: "top" }}>
+                  <td style={{ padding: "7px 8px", maxWidth: 320 }}>
+                    <div style={{ fontWeight: 600 }}>{r.name}</div>
+                    {r.alt_names && (
+                      <div style={{ fontSize: 11, color: MUTED, marginTop: 2 }}>
+                        a.k.a. {String(r.alt_names).slice(0, 120)}{String(r.alt_names).length > 120 ? "…" : ""}
+                      </div>
+                    )}
+                  </td>
+                  <td style={{ padding: "7px 8px", whiteSpace: "nowrap" }}>{r.countryList.join(", ")}</td>
+                  <td style={{ padding: "7px 8px", fontFamily: MONO, fontSize: 11, whiteSpace: "nowrap" }}>
+                    {r.federal_register_notice || "—"}
+                    {r.frYear ? <span style={{ color: MUTED }}> ·{r.frYear}</span> : null}
+                  </td>
+                  {showHits && (
+                    <td style={{ padding: "7px 8px" }}>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        {r.hits.slice(0, 3).map((h, i) => (
+                          <Chip key={i} color={NAVY}>{h.k}·{h.field}</Chip>
+                        ))}
+                        {r.hits.length > 3 && <Chip>+{r.hits.length - 3}</Chip>}
+                      </div>
+                    </td>
+                  )}
+                  <td style={{ padding: "7px 8px", whiteSpace: "nowrap" }}>
+                    {!v && <span style={{ color: MUTED, fontFamily: MONO, fontSize: 11 }}>—</span>}
+                    {v && v.status === "running" && <Chip color={BLUE}>SLEUTHING…</Chip>}
+                    {v && v.status === "error" && <Chip color={RED}>ERROR</Chip>}
+                    {vs && <Chip color={vs.color} bg={vs.color + "12"}>{vs.label} · {v.result.confidence}</Chip>}
+                  </td>
+                  <td style={{ padding: "7px 8px", whiteSpace: "nowrap", textAlign: "right" }}>
+                    <Btn small tone="ghost" onClick={() => onSleuth(r)} disabled={!sleuthEnabled || (v && v.status === "running")}>
+                      Sleuth
+                    </Btn>{" "}
+                    {(v && v.status === "done") || r.remarks ? (
+                      <Btn small tone="ghost" onClick={() => setOpen((o) => ({ ...o, [r._id]: !o[r._id] }))}>
+                        {isOpen ? "Hide" : "Detail"}
+                      </Btn>
+                    ) : null}
+                  </td>
+                </tr>
+                {isOpen && (
+                  <tr style={{ borderBottom: `1px solid ${LINE}`, background: "#FAFBFC" }}>
+                    <td colSpan={showHits ? 6 : 5} style={{ padding: "10px 14px" }}>
+                      {r.remarks && (
+                        <div style={{ fontSize: 12, marginBottom: 8 }}>
+                          <span style={{ fontFamily: MONO, fontSize: 10.5, color: MUTED }}>FR REMARKS </span>
+                          {r.remarks}
+                        </div>
+                      )}
+                      {v && v.status === "done" && (
+                        <div style={{ fontSize: 12.5, lineHeight: 1.55 }}>
+                          {v.result.parent && (
+                            <div><span style={{ fontFamily: MONO, fontSize: 10.5, color: MUTED }}>PARENT </span><b>{v.result.parent}</b></div>
+                          )}
+                          <div style={{ marginTop: 4 }}>{v.result.evidence}</div>
+                          {(v.result.sources || []).length > 0 && (
+                            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+                              {v.result.sources.map((s, i) => (
+                                <a key={i} href={s} target="_blank" rel="noreferrer"
+                                  style={{ color: BLUE, fontFamily: MONO, fontSize: 11, wordBreak: "break-all" }}>
+                                  {s}
+                                </a>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {v && v.status === "error" && (
+                        <div style={{ color: RED, fontFamily: MONO, fontSize: 11.5 }}>
+                          Sub-agent call failed: {v.error}. Try again — transient API errors are common in batch runs.
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<EntityListTracker />);
+</script>
+</body>
+</html>
